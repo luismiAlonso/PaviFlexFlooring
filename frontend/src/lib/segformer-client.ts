@@ -35,23 +35,8 @@ export async function segmentFloorClient(file: File): Promise<SegmentResult> {
   }
 
   try {
-    // 2. Llamar a HF Inference API directamente desde el browser
-    const response = await fetch(`${HF_API}/${model}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${hf_token}`,
-        "Content-Type": file.type,
-        "x-wait-for-model": "true",  // espera si el modelo está cargando
-      },
-      body: file,
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`HF ${response.status}: ${errText.slice(0, 100)}`);
-    }
-
-    const segments = await response.json() as Array<{ label: string; mask: string }>;
+    // 2. Llamar a HF con reintentos automáticos si el modelo está cargando
+    const segments = await fetchWithRetry(hf_token, model, file);
     console.log("[segformer] Labels detectados:", segments.map((s) => s.label));
 
     // 3. Encontrar segmento de suelo
@@ -74,6 +59,45 @@ export async function segmentFloorClient(file: File): Promise<SegmentResult> {
     console.error("[segformer] Error:", msg);
     return mockResult(W, H, `mock:error:${msg.slice(0, 60)}`);
   }
+}
+
+// ─── HF fetch con reintentos ─────────────────────────────────────────────────
+
+async function fetchWithRetry(
+  token: string,
+  model: string,
+  file: File,
+  maxRetries = 8
+): Promise<Array<{ label: string; mask: string }>> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const response = await fetch(`${HF_API}/${model}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": file.type,
+      },
+      body: file,
+    });
+
+    if (response.ok) {
+      return response.json();
+    }
+
+    if (response.status === 503) {
+      // Modelo cargando — HF devuelve estimated_time
+      const body = await response.json().catch(() => ({})) as { estimated_time?: number };
+      const wait = Math.min((body.estimated_time ?? 10) * 1000, 15000);
+      console.log(`[segformer] Modelo cargando, esperando ${wait / 1000}s (intento ${attempt + 1}/${maxRetries})`);
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
+
+    // Otro error
+    const errText = await response.text().catch(() => response.statusText);
+    throw new Error(`HF ${response.status}: ${errText.slice(0, 100)}`);
+  }
+
+  throw new Error("El modelo no arrancó tras varios intentos. Prueba en unos minutos.");
 }
 
 // ─── Extracción de vértices ──────────────────────────────────────────────────
