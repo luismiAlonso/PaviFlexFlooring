@@ -19,4 +19,5 @@ export interface SegmentationResult {
   floor_corners: number[][];      // [[x,y], ...]
   homography_matrix: number[][];  // 3x3
   depth_map: number[][];          // downsampled depth
+  source?: string;                // "segformer" | "mock:..." — debug info
 }

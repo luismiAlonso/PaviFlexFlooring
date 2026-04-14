@@ -36,20 +36,21 @@ export async function POST(req: NextRequest) {
 
   // Sin token → fallback al mock
   if (!process.env.HF_TOKEN) {
-    console.warn("HF_TOKEN no configurado — usando mock");
-    return mockResponse(buffer, file.type);
+    console.warn("[segment] HF_TOKEN no configurado — usando mock");
+    return mockResponse(buffer, file.type, "mock:no_token");
   }
+
+  console.log("[segment] HF_TOKEN encontrado, llamando a SegFormer...");
 
   try {
     const corners = await segmentFloorHF(buffer);
     const { width, height } = await getImageSize(buffer);
-
-    return NextResponse.json(buildResponse(width, height, corners));
+    console.log("[segment] SegFormer OK — corners:", JSON.stringify(corners));
+    return NextResponse.json({ ...buildResponse(width, height, corners), source: "segformer" });
 
   } catch (err) {
-    console.error("HF segmentation error:", err);
-    // Si falla HF, caemos al mock para no romper la UI
-    return mockResponse(buffer, file.type);
+    console.error("[segment] HF error:", err instanceof Error ? err.message : err);
+    return mockResponse(buffer, file.type, `mock:hf_error:${err instanceof Error ? err.message : "unknown"}`);
   }
 }
 
@@ -168,7 +169,8 @@ function buildResponse(W: number, H: number, corners512: number[][]) {
 
 // ─── Mock (fallback sin HF_TOKEN) ────────────────────────────────────────────
 
-async function mockResponse(buffer: Buffer, mimeType: string) {
+async function mockResponse(buffer: Buffer, mimeType: string, source = "mock") {
+  console.warn("[segment] Usando mock, source:", source);
   let W = 1280, H = 960;
   try {
     const meta = await sharp(buffer).metadata();
@@ -187,7 +189,7 @@ async function mockResponse(buffer: Buffer, mimeType: string) {
     [0, H],
   ];
 
-  return NextResponse.json(buildResponse(W, H, corners.map(([x,y]) => [x*512/W, y*512/H])));
+  return NextResponse.json({ ...buildResponse(W, H, corners.map(([x,y]) => [x*512/W, y*512/H])), source });
 }
 
 function getJpegPngSize(bytes: Buffer, mime: string): { width: number; height: number } {

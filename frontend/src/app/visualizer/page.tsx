@@ -29,10 +29,20 @@ export default function VisualizerPage() {
         {/* Canvas principal — ocupa todo el espacio disponible */}
         <main className="flex-1 flex items-center justify-center bg-gray-900 overflow-hidden min-h-0">
           {result ? (
-            <FloorVisualizer
-              segmentationResult={result}
-              texture={selectedTexture}
-            />
+            <div className="relative w-full h-full flex items-center justify-center">
+              <FloorVisualizer
+                segmentationResult={result}
+                texture={selectedTexture}
+              />
+              {/* Badge: IA real vs mock */}
+              <div className={`absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                result.source === "segformer"
+                  ? "bg-brand-600 text-white"
+                  : "bg-yellow-600 text-white"
+              }`}>
+                {result.source === "segformer" ? "IA SegFormer" : `Mock${result.source ? `: ${result.source.replace("mock:", "")}` : ""}`}
+              </div>
+            </div>
           ) : (
             <div className="text-center text-gray-600 select-none">
               {isLoading ? (
