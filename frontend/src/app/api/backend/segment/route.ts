@@ -49,8 +49,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ...buildResponse(width, height, corners), source: "segformer" });
 
   } catch (err) {
-    console.error("[segment] HF error:", err instanceof Error ? err.message : err);
-    return mockResponse(buffer, file.type, `mock:hf_error:${err instanceof Error ? err.message : "unknown"}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : "";
+    console.error("[segment] HF error completo:", msg, stack);
+    return mockResponse(buffer, file.type, `mock:hf_error:${msg.slice(0, 80)}`);
   }
 }
 
