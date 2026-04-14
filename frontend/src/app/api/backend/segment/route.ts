@@ -61,7 +61,7 @@ async function segmentFloorHF(imageBuffer: Buffer): Promise<number[][]> {
 
   const segments = await hf.imageSegmentation({
     model: MODEL,
-    data: imageBuffer,
+    data: new Blob([imageBuffer]),
   });
 
   // ADE20K usa "floor" o "floor, flooring" como etiqueta
