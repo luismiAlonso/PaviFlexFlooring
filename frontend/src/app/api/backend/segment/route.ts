@@ -120,53 +120,58 @@ export async function POST(req: Request) {
 async function extractCorners(maskDataUrl: string): Promise<number[][]> {
   const base64 = maskDataUrl.replace(/^data:image\/\w+;base64,/, "");
   const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type: "image/png" });
 
-  // Leer dimensiones PNG: bytes 16-23
-  const mW = (bytes[16] << 24 | bytes[17] << 16 | bytes[18] << 8 | bytes[19]) >>> 0;
-  const mH = (bytes[20] << 24 | bytes[21] << 16 | bytes[22] << 8 | bytes[23]) >>> 0;
+  // Decodificar PNG usando createImageBitmap + OffscreenCanvas (disponible en Edge/Deno)
+  let pixelData: Uint8ClampedArray;
+  let mW: number, mH: number;
 
-  if (!mW || !mH) throw new Error(`Invalid PNG dimensions: ${mW}x${mH}`);
-  console.log(`[segment] Mask size: ${mW}x${mH}`);
+  try {
+    const bitmap = await createImageBitmap(blob);
+    mW = bitmap.width;
+    mH = bitmap.height;
+    console.log(`[segment] Mask decoded: ${mW}x${mH}`);
 
-  // Descomprimir IDAT para obtener píxeles
-  // Enfoque simplificado: buscar filas/columnas con píxeles blancos estimando
-  // desde el layout del PNG sin descompresión completa (aproximación válida)
-  // Para producción usar el backend Python con OpenCV real.
+    const canvas = new OffscreenCanvas(mW, mH);
+    const ctx = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D;
+    ctx.drawImage(bitmap, 0, 0);
+    pixelData = ctx.getImageData(0, 0, mW, mH).data;
+  } catch (e) {
+    console.error("[segment] createImageBitmap failed:", e);
+    throw new Error(`Canvas decode failed: ${e}`);
+  }
 
-  // Alternativa robusta: usar la bbox del PNG comprimido como aproximación
-  // El mask de HF tiene píxeles blancos para el suelo detectado.
-  // Estimamos la bbox escaneando el stream comprimido buscando bytes 0xFF.
-  const whiteBytePositions: number[] = [];
-  for (let i = 8; i < bytes.length - 12; i++) {
-    if (bytes[i] === 0xff && bytes[i + 1] === 0xff) {
-      whiteBytePositions.push(i);
+  // Recopilar píxeles del suelo (R > 128 = blanco = suelo)
+  const top: Array<[number, number]> = [];
+  const bot: Array<[number, number]> = [];
+  const midY = mH / 2;
+
+  for (let y = 0; y < mH; y++) {
+    for (let x = 0; x < mW; x++) {
+      if (pixelData[(y * mW + x) * 4] > 128) {
+        (y < midY ? top : bot).push([x, y]);
+      }
     }
   }
 
-  if (whiteBytePositions.length < 4) {
-    throw new Error("Máscara vacía o sin suelo");
-  }
+  const all = [...top, ...bot];
+  if (all.length < 10) throw new Error(`Floor mask too small: ${all.length}px`);
 
-  // Usar las posiciones para estimar la región del suelo proporcional
-  const dataStart = 33; // offset approx del inicio de datos IDAT
-  const dataLen = bytes.length - dataStart;
-  const relPositions = whiteBytePositions.map((p) => (p - dataStart) / dataLen);
-  const minRel = Math.min(...relPositions);
-  const maxRel = Math.max(...relPositions);
+  console.log(`[segment] Floor pixels: top=${top.length} bot=${bot.length}`);
 
-  // Proyectar posiciones relativas a coordenadas 512x512
-  const topY    = Math.max(0,   Math.round(minRel * mH));
-  const bottomY = Math.min(mH,  Math.round(maxRel * mH));
-  const midRel  = (minRel + maxRel) / 2;
-  const spread  = (maxRel - minRel) * 0.5;
-  const leftX   = Math.max(0,  Math.round((midRel - spread) * mW));
-  const rightX  = Math.min(mW, Math.round((midRel + spread) * mW));
+  const src = top.length > 0 ? top : all;
+  const btm = bot.length > 0 ? bot  : all;
+
+  const minX = (a: Array<[number,number]>) => Math.min(...a.map(([x]) => x));
+  const maxX = (a: Array<[number,number]>) => Math.max(...a.map(([x]) => x));
+  const minY = (a: Array<[number,number]>) => Math.min(...a.map(([,y]) => y));
+  const maxY = (a: Array<[number,number]>) => Math.max(...a.map(([,y]) => y));
 
   return [
-    [leftX + Math.round((rightX - leftX) * 0.15), topY],    // TL
-    [rightX - Math.round((rightX - leftX) * 0.15), topY],   // TR
-    [rightX, bottomY],                                        // BR
-    [leftX,  bottomY],                                        // BL
+    [minX(src), minY(src)],
+    [maxX(src), minY(src)],
+    [maxX(btm), maxY(btm)],
+    [minX(btm), maxY(btm)],
   ];
 }
 
