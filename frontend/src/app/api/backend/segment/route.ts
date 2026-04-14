@@ -5,8 +5,13 @@
 
 export const runtime = "edge";
 
-const HF_API = "https://api-inference.huggingface.co/models";
-const MODEL  = "nvidia/segformer-b0-finetuned-ade-512-512";
+// HF cambió su API en 2025 — probamos URLs en orden hasta que una funcione
+const MODEL = "nvidia/segformer-b0-finetuned-ade-512-512";
+const HF_URLS = [
+  `https://api-inference.huggingface.co/models/${MODEL}`,
+  `https://api-inference.huggingface.co/pipeline/image-segmentation/${MODEL}`,
+  `https://router.huggingface.co/hf-inference/models/${MODEL}`,
+];
 
 export async function POST(req: Request) {
   const token = process.env.HF_TOKEN;
@@ -29,17 +34,19 @@ export async function POST(req: Request) {
     return mockJson(await getImageSize(imageBlob), "mock:no_token");
   }
 
-  // Reintenta hasta que el modelo esté listo (503 = cargando)
+  // Prueba cada URL disponible con reintentos para 503
   let attempt = 0;
-  const maxAttempts = 5;
+  const maxAttempts = 6;
+  let urlIndex = 0;
 
   while (attempt < maxAttempts) {
     attempt++;
-    console.log(`[segment] HF attempt ${attempt}/${maxAttempts}`);
+    const url = HF_URLS[urlIndex % HF_URLS.length];
+    console.log(`[segment] attempt ${attempt}/${maxAttempts} → ${url}`);
 
     let hfRes: Response;
     try {
-      hfRes = await fetch(`${HF_API}/${MODEL}`, {
+      hfRes = await fetch(url, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": contentType },
         body: imageBlob,
@@ -49,7 +56,8 @@ export async function POST(req: Request) {
       return mockJson(await getImageSize(imageBlob), `mock:fetch_error:${String(err).slice(0,60)}`);
     }
 
-    console.log(`[segment] HF status: ${hfRes.status}`);
+    const bodyPreview = await hfRes.clone().text().then(t => t.slice(0, 150)).catch(() => "");
+    console.log(`[segment] status ${hfRes.status} url=${url.split("/").pop()} body=${bodyPreview}`);
 
     if (hfRes.ok) {
       let segments: Array<{ label: string; mask: string }>;
@@ -90,9 +98,18 @@ export async function POST(req: Request) {
       continue;
     }
 
-    const errBody = await hfRes.text().catch(() => "");
-    console.error(`[segment] HF error ${hfRes.status}:`, errBody.slice(0, 200));
-    return mockJson(await getImageSize(imageBlob), `mock:hf_${hfRes.status}:${errBody.slice(0,50)}`);
+    if (hfRes.status === 410 || hfRes.status === 404) {
+      // URL deprecated — probar la siguiente
+      console.warn(`[segment] ${hfRes.status} on ${url} — trying next URL`);
+      urlIndex++;
+      if (urlIndex >= HF_URLS.length) {
+        return mockJson(await getImageSize(imageBlob), `mock:hf_${hfRes.status}:all_urls_failed`);
+      }
+      continue;
+    }
+
+    console.error(`[segment] HF error ${hfRes.status}:`, bodyPreview);
+    return mockJson(await getImageSize(imageBlob), `mock:hf_${hfRes.status}:${bodyPreview.slice(0,50)}`);
   }
 
   return mockJson(await getImageSize(imageBlob), "mock:max_retries");
