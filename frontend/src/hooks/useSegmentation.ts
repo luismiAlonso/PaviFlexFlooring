@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { segmentFloorClient } from "@/lib/segformer-client";
 import type { SegmentationResult } from "@/types";
 
 export function useSegmentation() {
@@ -17,11 +16,23 @@ export function useSegmentation() {
     setPhotoUrl(newPhotoUrl);
 
     try {
-      const data = await segmentFloorClient(file);
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch("/api/backend/segment", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.detail ?? `Error ${res.status}`);
+      }
+
+      const data = await res.json();
       setResult({ ...data, photoUrl: newPhotoUrl });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Error al procesar la imagen";
-      setError(message);
+      setError(err instanceof Error ? err.message : "Error al procesar la imagen");
     } finally {
       setIsLoading(false);
     }
