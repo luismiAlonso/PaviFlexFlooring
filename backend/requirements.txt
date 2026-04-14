@@ -1,0 +1,17 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# AI / ML
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.47.1
+Pillow==11.0.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+
+# SAM 2 — install from source (see README)
+# git+https://github.com/facebookresearch/segment-anything-2.git
