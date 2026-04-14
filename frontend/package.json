@@ -19,7 +19,9 @@
     "zustand": "^5.0.2",
     "axios": "^1.7.9",
     "clsx": "^2.1.1",
-    "tailwind-merge": "^2.6.0"
+    "tailwind-merge": "^2.6.0",
+    "@huggingface/inference": "^2.8.1",
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@netlify/plugin-nextjs": "^5.9.3",

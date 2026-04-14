@@ -1,18 +1,26 @@
 /**
- * Mock del endpoint /api/segment del backend Python.
+ * Segmentación de suelo con SegFormer B0 ADE20K via HuggingFace Inference API.
  *
- * Lee las dimensiones reales de la imagen subida y genera un trapecio
- * de suelo proporcional a esas dimensiones.
+ * Modelo: nvidia/segformer-b0-finetuned-ade-512-512
+ * Dataset: ADE20K — incluye etiqueta "floor" específica para suelos de interior
  *
- * NOTA: Este mock siempre devuelve el mismo trapecio inferior — la
- * detección real de suelo la hará SAM 2 en el backend Python.
+ * Flujo:
+ *   1. Recibe la imagen del usuario
+ *   2. La envía a HF Inference API
+ *   3. Extrae la máscara de la etiqueta "floor"
+ *   4. Calcula los 4 vértices del polígono de suelo
+ *   5. Devuelve corners + dimensiones al frontend
+ *
+ * Si HF_TOKEN no está configurado cae al mock (trapecio fijo).
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { HfInference } from "@huggingface/inference";
+import sharp from "sharp";
+
+const MODEL = "nvidia/segformer-b0-finetuned-ade-512-512";
 
 export async function POST(req: NextRequest) {
-  await new Promise((r) => setTimeout(r, 900));
-
   const formData = await req.formData();
   const file = formData.get("file") as File | null;
 
@@ -20,83 +28,184 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ detail: "No se recibió ningún archivo" }, { status: 400 });
   }
 
-  // Leer dimensiones reales de la imagen
-  const buffer = await file.arrayBuffer();
-  const { width: W, height: H } = await getImageDimensions(buffer, file.type);
+  if (file.size > 20 * 1024 * 1024) {
+    return NextResponse.json({ detail: "Imagen demasiado grande (max 20 MB)" }, { status: 413 });
+  }
 
-  // Trapecio de suelo en perspectiva central:
-  //   - Horizonte al 48% de la altura
-  //   - Punto de fuga centrado con margen del 20%
-  //   - Suelo llega hasta la esquina inferior completa
-  const horizonY  = Math.round(H * 0.48);
-  const vanishPct = 0.20; // qué % de margen tiene la línea de horizonte
-  const leftTop   = Math.round(W * vanishPct);
-  const rightTop  = Math.round(W * (1 - vanishPct));
+  const buffer = Buffer.from(await file.arrayBuffer());
 
-  const floor_corners = [
-    [leftTop,  horizonY],  // arriba-izquierda
-    [rightTop, horizonY],  // arriba-derecha
-    [W,        H],          // abajo-derecha (esquina exacta)
-    [0,        H],          // abajo-izquierda (esquina exacta)
-  ];
+  // Sin token → fallback al mock
+  if (!process.env.HF_TOKEN) {
+    console.warn("HF_TOKEN no configurado — usando mock");
+    return mockResponse(buffer, file.type);
+  }
 
-  const homography_matrix = [[1,0,0],[0,1,0],[0,0,1]];
+  try {
+    const corners = await segmentFloorHF(buffer);
+    const { width, height } = await getImageSize(buffer);
 
-  const totalPixels = W * H;
-  const floorPixels = Math.round(totalPixels * 0.38);
-  const floor_mask_rle = {
-    start_value: 0,
-    runs: [totalPixels - floorPixels, floorPixels],
-    shape: [H, W],
-  };
+    return NextResponse.json(buildResponse(width, height, corners));
 
-  const depthRows = 30;
-  const depthCols = 40;
-  const depth_map = Array.from({ length: depthRows }, (_, row) =>
-    Array.from({ length: depthCols }, () => Math.round((row / depthRows) * 255))
+  } catch (err) {
+    console.error("HF segmentation error:", err);
+    // Si falla HF, caemos al mock para no romper la UI
+    return mockResponse(buffer, file.type);
+  }
+}
+
+// ─── HuggingFace ────────────────────────────────────────────────────────────
+
+async function segmentFloorHF(imageBuffer: Buffer): Promise<number[][]> {
+  const hf = new HfInference(process.env.HF_TOKEN);
+
+  const segments = await hf.imageSegmentation({
+    model: MODEL,
+    data: imageBuffer,
+  });
+
+  // ADE20K usa "floor" o "floor, flooring" como etiqueta
+  const floorSeg = segments.find((s) =>
+    s.label?.toLowerCase().includes("floor")
   );
 
-  return NextResponse.json({
-    image_size: { width: W, height: H },
-    floor_mask_rle,
-    floor_corners,
-    homography_matrix,
-    depth_map,
-  });
+  if (!floorSeg?.mask) {
+    throw new Error(`No floor segment found. Labels: ${segments.map(s => s.label).join(", ")}`);
+  }
+
+  // La máscara llega como data URL "data:image/png;base64,..."
+  const base64 = floorSeg.mask.replace(/^data:image\/\w+;base64,/, "");
+  const maskBuffer = Buffer.from(base64, "base64");
+
+  return extractCornersFromMask(maskBuffer);
 }
 
 /**
- * Lee el ancho y alto de la imagen a partir de sus bytes, sin dependencias externas.
- * Soporta JPEG y PNG (los formatos más comunes).
+ * Dada una máscara PNG (blanco = suelo), devuelve los 4 vértices
+ * del trapecio de suelo en coordenadas de la imagen original.
+ *
+ * Estrategia: escanea la máscara buscando los píxeles más extremos
+ * en cada cuadrante para construir un trapecio realista.
  */
-async function getImageDimensions(
-  buffer: ArrayBuffer,
-  mimeType: string
-): Promise<{ width: number; height: number }> {
-  const bytes = new Uint8Array(buffer);
+async function extractCornersFromMask(maskBuffer: Buffer): Promise<number[][]> {
+  const { data, info } = await sharp(maskBuffer)
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
+  const { width: mW, height: mH } = info;
+
+  // Recopilar todos los píxeles de suelo (valor > 128 = blanco)
+  const floorPixels: Array<[number, number]> = [];
+  for (let y = 0; y < mH; y++) {
+    for (let x = 0; x < mW; x++) {
+      if (data[y * mW + x] > 128) {
+        floorPixels.push([x, y]);
+      }
+    }
+  }
+
+  if (floorPixels.length < 10) {
+    throw new Error("Máscara de suelo demasiado pequeña");
+  }
+
+  // Dividir en mitad superior e inferior para sacar los 4 vértices
+  const midY = mH / 2;
+  const topPixels    = floorPixels.filter(([, y]) => y < midY);
+  const bottomPixels = floorPixels.filter(([, y]) => y >= midY);
+
+  const minX = (arr: Array<[number, number]>) => Math.min(...arr.map(([x]) => x));
+  const maxX = (arr: Array<[number, number]>) => Math.max(...arr.map(([x]) => x));
+  const minY = (arr: Array<[number, number]>) => Math.min(...arr.map(([, y]) => y));
+  const maxY = (arr: Array<[number, number]>) => Math.max(...arr.map(([, y]) => y));
+
+  const src = topPixels.length > 0 ? topPixels : floorPixels;
+  const btm = bottomPixels.length > 0 ? bottomPixels : floorPixels;
+
+  // 4 corners: [TL, TR, BR, BL] en espacio de la máscara (512x512)
+  const corners512: number[][] = [
+    [minX(src), minY(src)],  // TL
+    [maxX(src), minY(src)],  // TR
+    [maxX(btm), maxY(btm)],  // BR
+    [minX(btm), maxY(btm)],  // BL
+  ];
+
+  return corners512;
+}
+
+// ─── Utilidades ──────────────────────────────────────────────────────────────
+
+async function getImageSize(buf: Buffer): Promise<{ width: number; height: number }> {
+  const meta = await sharp(buf).metadata();
+  return { width: meta.width ?? 1280, height: meta.height ?? 960 };
+}
+
+function buildResponse(W: number, H: number, corners512: number[][]) {
+  // La máscara es 512×512, escalar corners a dimensiones reales de la imagen
+  const scaleX = W / 512;
+  const scaleY = H / 512;
+  const corners = corners512.map(([x, y]) => [
+    Math.round(x * scaleX),
+    Math.round(y * scaleY),
+  ]);
+
+  const totalPixels = W * H;
+  const floorPixels = Math.round(totalPixels * 0.35);
+
+  return {
+    image_size: { width: W, height: H },
+    floor_corners: corners,
+    homography_matrix: [[1,0,0],[0,1,0],[0,0,1]],
+    floor_mask_rle: {
+      start_value: 0,
+      runs: [totalPixels - floorPixels, floorPixels],
+      shape: [H, W],
+    },
+    depth_map: Array.from({ length: 30 }, (_, row) =>
+      Array.from({ length: 40 }, () => Math.round((row / 30) * 255))
+    ),
+  };
+}
+
+// ─── Mock (fallback sin HF_TOKEN) ────────────────────────────────────────────
+
+async function mockResponse(buffer: Buffer, mimeType: string) {
+  let W = 1280, H = 960;
   try {
-    if (mimeType === "image/png") {
-      // PNG: ancho en bytes 16-19, alto en bytes 20-23
-      const w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
-      const h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+    const meta = await sharp(buffer).metadata();
+    W = meta.width ?? W;
+    H = meta.height ?? H;
+  } catch {
+    ({ width: W, height: H } = getJpegPngSize(buffer, mimeType));
+  }
+
+  const horizonY = Math.round(H * 0.48);
+  const margin   = Math.round(W * 0.20);
+  const corners  = [
+    [margin,   horizonY],
+    [W-margin, horizonY],
+    [W, H],
+    [0, H],
+  ];
+
+  return NextResponse.json(buildResponse(W, H, corners.map(([x,y]) => [x*512/W, y*512/H])));
+}
+
+function getJpegPngSize(bytes: Buffer, mime: string): { width: number; height: number } {
+  try {
+    if (mime === "image/png") {
+      const w = (bytes[16] << 24)|(bytes[17] << 16)|(bytes[18] << 8)|bytes[19];
+      const h = (bytes[20] << 24)|(bytes[21] << 16)|(bytes[22] << 8)|bytes[23];
       if (w > 0 && h > 0) return { width: w, height: h };
     }
-
-    if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
-      // JPEG: buscar marcador SOF (0xFF 0xC0 o 0xFF 0xC2)
+    if (mime.includes("jpeg") || mime.includes("jpg")) {
       for (let i = 0; i < bytes.length - 9; i++) {
-        if (bytes[i] === 0xff && (bytes[i + 1] === 0xc0 || bytes[i + 1] === 0xc2)) {
-          const h = (bytes[i + 5] << 8) | bytes[i + 6];
-          const w = (bytes[i + 7] << 8) | bytes[i + 8];
+        if (bytes[i] === 0xff && (bytes[i+1] === 0xc0 || bytes[i+1] === 0xc2)) {
+          const h = (bytes[i+5] << 8)|bytes[i+6];
+          const w = (bytes[i+7] << 8)|bytes[i+8];
           if (w > 0 && h > 0) return { width: w, height: h };
         }
       }
     }
-  } catch {
-    // fallback below
-  }
-
-  // Fallback: aspect 4:3 estándar
+  } catch { /* */ }
   return { width: 1280, height: 960 };
 }
