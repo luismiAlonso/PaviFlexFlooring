@@ -1,16 +1,5 @@
 "use client";
 
-/**
- * FloorVisualizer — renders the user's room photo with the floor texture
- * projected onto the detected floor region using Three.js / WebGL.
- *
- * Architecture:
- *   - The room photo is displayed as a full background <img>
- *   - An <canvas> overlay sits on top using CSS `mix-blend-mode: multiply`
- *   - Three.js renders the texture warped through the homography matrix
- *     so it aligns perfectly with the physical floor in perspective
- */
-
 import { useEffect, useRef } from "react";
 import type { SegmentationResult } from "@/types";
 import type { Texture } from "@/lib/textures";
@@ -27,17 +16,13 @@ export default function FloorVisualizer({ segmentationResult, texture }: Props) 
 
   useEffect(() => {
     if (!containerRef.current) return;
-
-    // Cleanup previous scene
     cleanupRef.current?.();
-
     const cleanup = buildFloorScene({
       container: containerRef.current,
       segmentation: segmentationResult,
-      textureUrl: texture.url,
+      texture,
     });
     cleanupRef.current = cleanup;
-
     return cleanup;
   }, [segmentationResult, texture]);
 
