@@ -5,6 +5,7 @@ import Link from "next/link";
 import ImageUpload from "@/components/ImageUpload";
 import FloorVisualizer from "@/components/FloorVisualizer";
 import TexturePicker from "@/components/TexturePicker";
+import LoadingAnalysis from "@/components/LoadingAnalysis";
 import { useSegmentation } from "@/hooks/useSegmentation";
 import { TEXTURES } from "@/lib/textures";
 
@@ -46,10 +47,7 @@ export default function VisualizerPage() {
           ) : (
             <div className="text-center text-gray-600 select-none">
               {isLoading ? (
-                <div className="flex flex-col items-center gap-3">
-                  <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-sm text-gray-400">Analizando imagen...</p>
-                </div>
+                <LoadingAnalysis />
               ) : (
                 <>
                   <p className="text-5xl mb-3">🏠</p>
