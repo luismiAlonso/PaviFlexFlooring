@@ -1,16 +1,17 @@
 /**
  * Mock del endpoint /api/segment del backend Python.
- * Devuelve datos de segmentación falsos pero con la forma correcta,
- * para poder probar toda la UI sin necesidad de Python ni GPU.
  *
- * El "suelo" mock ocupa el trapecio inferior de la imagen (perspectiva básica).
+ * Lee las dimensiones reales de la imagen subida y genera un trapecio
+ * de suelo proporcional a esas dimensiones.
+ *
+ * NOTA: Este mock siempre devuelve el mismo trapecio inferior — la
+ * detección real de suelo la hará SAM 2 en el backend Python.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
-  // Simulamos el tiempo de procesamiento de los modelos IA
-  await new Promise((r) => setTimeout(r, 1200));
+  await new Promise((r) => setTimeout(r, 900));
 
   const formData = await req.formData();
   const file = formData.get("file") as File | null;
@@ -19,45 +20,40 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ detail: "No se recibió ningún archivo" }, { status: 400 });
   }
 
-  // Dimensiones ficticias (el frontend las usará para escalar el render)
-  const W = 800;
-  const H = 600;
+  // Leer dimensiones reales de la imagen
+  const buffer = await file.arrayBuffer();
+  const { width: W, height: H } = await getImageDimensions(buffer, file.type);
 
-  // Trapecio que simula un suelo en perspectiva:
-  //   punto de fuga ~centrado, suelo ocupa el 55% inferior
-  const floorY = Math.round(H * 0.45);
-  const vanishMargin = Math.round(W * 0.25); // margen en la línea de horizonte
+  // Trapecio de suelo en perspectiva central:
+  //   - Horizonte al 48% de la altura
+  //   - Punto de fuga centrado con margen del 20%
+  //   - Suelo llega hasta la esquina inferior completa
+  const horizonY  = Math.round(H * 0.48);
+  const vanishPct = 0.20; // qué % de margen tiene la línea de horizonte
+  const leftTop   = Math.round(W * vanishPct);
+  const rightTop  = Math.round(W * (1 - vanishPct));
 
   const floor_corners = [
-    [vanishMargin, floorY],           // arriba-izquierda
-    [W - vanishMargin, floorY],       // arriba-derecha
-    [W, H],                           // abajo-derecha
-    [0, H],                           // abajo-izquierda
+    [leftTop,  horizonY],  // arriba-izquierda
+    [rightTop, horizonY],  // arriba-derecha
+    [W,        H],          // abajo-derecha (esquina exacta)
+    [0,        H],          // abajo-izquierda (esquina exacta)
   ];
 
-  // Homografía identidad (suficiente para el mock)
-  const homography_matrix = [
-    [1, 0, 0],
-    [0, 1, 0],
-    [0, 0, 1],
-  ];
+  const homography_matrix = [[1,0,0],[0,1,0],[0,0,1]];
 
-  // Máscara RLE mínima (el frontend no la usa directamente todavía)
   const totalPixels = W * H;
-  const floorPixels = Math.round(totalPixels * 0.35);
+  const floorPixels = Math.round(totalPixels * 0.38);
   const floor_mask_rle = {
     start_value: 0,
     runs: [totalPixels - floorPixels, floorPixels],
     shape: [H, W],
   };
 
-  // Mapa de profundidad tiny (30x40) con gradiente simple
   const depthRows = 30;
   const depthCols = 40;
   const depth_map = Array.from({ length: depthRows }, (_, row) =>
-    Array.from({ length: depthCols }, () =>
-      Math.round((row / depthRows) * 255)
-    )
+    Array.from({ length: depthCols }, () => Math.round((row / depthRows) * 255))
   );
 
   return NextResponse.json({
@@ -67,4 +63,40 @@ export async function POST(req: NextRequest) {
     homography_matrix,
     depth_map,
   });
+}
+
+/**
+ * Lee el ancho y alto de la imagen a partir de sus bytes, sin dependencias externas.
+ * Soporta JPEG y PNG (los formatos más comunes).
+ */
+async function getImageDimensions(
+  buffer: ArrayBuffer,
+  mimeType: string
+): Promise<{ width: number; height: number }> {
+  const bytes = new Uint8Array(buffer);
+
+  try {
+    if (mimeType === "image/png") {
+      // PNG: ancho en bytes 16-19, alto en bytes 20-23
+      const w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+      const h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+      if (w > 0 && h > 0) return { width: w, height: h };
+    }
+
+    if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
+      // JPEG: buscar marcador SOF (0xFF 0xC0 o 0xFF 0xC2)
+      for (let i = 0; i < bytes.length - 9; i++) {
+        if (bytes[i] === 0xff && (bytes[i + 1] === 0xc0 || bytes[i + 1] === 0xc2)) {
+          const h = (bytes[i + 5] << 8) | bytes[i + 6];
+          const w = (bytes[i + 7] << 8) | bytes[i + 8];
+          if (w > 0 && h > 0) return { width: w, height: h };
+        }
+      }
+    }
+  } catch {
+    // fallback below
+  }
+
+  // Fallback: aspect 4:3 estándar
+  return { width: 1280, height: 960 };
 }
