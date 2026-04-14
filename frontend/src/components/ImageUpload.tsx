@@ -39,8 +39,10 @@ export default function ImageUpload({ onImage, isLoading }: Props) {
           videoRef.current.srcObject = mediaStream;
         }
       }, 100);
-    } catch {
-      setCameraError("No se pudo acceder a la cámara. Comprueba los permisos.");
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      console.error("Camera error:", msg);
+      setCameraError(`Error: ${msg}`);
     }
   }, []);
 
